@@ -1,0 +1,25 @@
+@import "tailwindcss";
+
+/* Defina as cores da marca aqui (Tailwind v4) */
+@theme {
+  --color-brand-black: #0a0a0a;
+  --color-brand-gold: #FFD700;
+  --color-brand-gold-dark: #B8860B;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+/* Estilos globais usando as cores da marca */
+body {
+  background-color: var(--color-brand-black);
+  color: white;
+}
+
+a {
+  color: var(--color-brand-gold);
+}
+a:hover {
+  color: white;
+}
