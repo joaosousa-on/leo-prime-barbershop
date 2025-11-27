@@ -40,7 +40,7 @@ export default function AgendarPage() {
   const dropdownRef = useRef(null);
 
   // Configurações da Barbearia
-  const whatsappNumber = "5571987404707"; // Apenas números
+  const whatsappNumber = "5571987404707"; 
   const whatsappFormatted = "(71) 98740-4707";
   const address = "Rua São José, Jardim Nova Esperança";
   const city = "Salvador, Bahia";
@@ -48,7 +48,6 @@ export default function AgendarPage() {
 
   // --- FUNÇÕES AUXILIARES ---
 
-  // Função para obter data local correta (Igual ao Admin)
   const getLocalDate = () => {
     const date = new Date();
     const offset = date.getTimezoneOffset();
@@ -82,20 +81,18 @@ export default function AgendarPage() {
     }
   };
 
-  // --- LÓGICA DE BLOQUEIO CORRIGIDA ---
+  // --- LÓGICA DE BLOQUEIO ---
 
   const checkShopBlock = async () => {
     try {
-      // Usa a data local para garantir sincronia com o Admin
       const today = getLocalDate();
       
-      // Busca bloqueio ESPECÍFICO para a data de hoje
       const { data: activeBlocks, error } = await supabase
         .from('blocks')
         .select('*')
-        .eq('date', today) // Filtra pela data exata
+        .eq('date', today)
         .eq('reason', 'BLOQUEIO_GERAL')
-        .maybeSingle(); // Retorna um ou null
+        .maybeSingle();
 
       if (error) {
         console.log('ℹ️ Erro ao verificar bloqueio:', error.message);
@@ -103,16 +100,12 @@ export default function AgendarPage() {
       }
 
       if (activeBlocks) {
-        console.log('🚫 Barbearia BLOQUEADA para hoje:', activeBlocks);
         setIsShopBlocked(true);
         setShopBlockMessage(activeBlocks.reason || "Barbearia fechada temporariamente.");
-        
-        // Limpa slots se estiver bloqueado
         setAvailableSlots([]);
         setSelectedTime("");
         setShowTimeDropdown(false);
       } else {
-        console.log('✅ Barbearia LIBERADA hoje');
         setIsShopBlocked(false);
         setShopBlockMessage("");
       }
@@ -127,7 +120,6 @@ export default function AgendarPage() {
   useEffect(() => {
     loadInitialData();
     
-    // Listener para Status (Aberto/Fechado/Almoço)
     const statusSub = supabase
       .channel('public:shop_status')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'shop_status' }, 
@@ -137,12 +129,10 @@ export default function AgendarPage() {
       )
       .subscribe();
 
-    // Listener para Bloqueios (Bloqueio Geral)
     const blocksSub = supabase
       .channel('public:blocks')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'blocks' },
         async () => {
-          console.log('🔄 Atualização de bloqueios detectada');
           await checkShopBlock();
           if (selectedDate) await loadAvailableSlots(selectedDate);
         }
@@ -155,7 +145,6 @@ export default function AgendarPage() {
     };
   }, []);
 
-  // Fecha dropdown ao clicar fora
   useEffect(() => {
     const handleClickOutside = (event) => {
       if (dropdownRef.current && !dropdownRef.current.contains(event.target)) {
@@ -166,7 +155,6 @@ export default function AgendarPage() {
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
-  // Carrega slots ao mudar data
   useEffect(() => {
     if (selectedDate) {
       loadAvailableSlots(selectedDate);
@@ -246,30 +234,26 @@ export default function AgendarPage() {
     setIsDateBlocked(false);
     
     try {
-      // 1. Verifica bloqueio geral primeiro
       await checkShopBlock();
       if (isShopBlocked) {
         setLoading(false);
         return;
       }
 
-      // 2. Verifica bloqueio específico da data (caso exista lógica para isso no futuro)
-      // ... (código existente mantido)
-
-      // 3. Busca agendamentos existentes
+      // Busca agendamentos CONFIRMADOS ou PENDENTES para bloquear
+      // Ignora os cancelados, permitindo que o horário apareça livre
       const { data: existingAppointments } = await supabase
         .from('appointments')
         .select('time')
         .eq('date', date)
-        .eq('status', 'confirmed');
+        .in('status', ['confirmed', 'pending']);
 
-      // 4. Define horários baseados no dia da semana
       const [year, month, day] = date.split('-').map(Number);
       const dateObj = new Date(year, month - 1, day);
       const weekday = dateObj.getDay();
       
       let startTime = "09:00";
-      let endTime = weekday === 0 ? "12:00" : "22:00"; // Domingo até 12h, resto até 22h
+      let endTime = weekday === 0 ? "12:00" : "22:00"; 
       
       const allSlots = generateTimeSlots(startTime, endTime, 70);
       const today = getLocalDate();
@@ -293,12 +277,11 @@ export default function AgendarPage() {
     }
   };
 
-  // --- ENVIO DO FORMULÁRIO ---
+  // --- ENVIO DO FORMULÁRIO (LÓGICA DE UPSERT/RECICLAGEM) ---
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     
-    // Validações Iniciais
     await checkShopBlock();
     if (isShopBlocked) {
       alert("Agendamentos bloqueados no momento.");
@@ -313,42 +296,73 @@ export default function AgendarPage() {
     setLoading(true);
 
     try {
-      // Verifica disponibilidade final (Race condition check)
-      const { data: checkBusy } = await supabase
+      // 1. Verifica se JÁ EXISTE algum registro nesse horário (mesmo cancelado)
+      const { data: existingSlot, error: checkError } = await supabase
         .from('appointments')
-        .select('id')
+        .select('*')
         .eq('date', selectedDate)
         .eq('time', selectedTime)
-        .eq('status', 'confirmed');
+        .maybeSingle();
 
-      if (checkBusy && checkBusy.length > 0) {
-        alert("Ops! Esse horário acabou de ser ocupado.");
-        await loadAvailableSlots(selectedDate);
-        setLoading(false);
-        return;
-      }
+      if (checkError) throw checkError;
 
+      // Dados do novo agendamento
       const appointmentData = {
         customer_name: formData.customer_name,
         customer_phone: formData.customer_phone,
-        service_id: formData.service_id,
+        service_id: parseInt(formData.service_id, 10),
         date: selectedDate,
         time: selectedTime,
         status: 'pending',
-        created_at: new Date().toISOString()
+        // Reseta campos de controle
+        status_atrasado: null,
+        notified_15min: false,
+        notified_atrasado: false,
+        created_at: new Date().toISOString() // Atualiza a data de criação para agora
       };
 
-      // Salva no Supabase
-      const { data: newAppointment, error: dbError } = await supabase
-        .from('appointments')
-        .insert([appointmentData])
-        .select()
-        .single();
+      let dbError = null;
 
-      if (dbError) throw dbError;
+      if (existingSlot) {
+        // --- CENÁRIO A: JÁ EXISTE REGISTRO ---
+        
+        if (existingSlot.status === 'cancelled') {
+          // Se está CANCELADO, nós RECICLAMOS (Update)
+          console.log("♻️ Reciclando horário cancelado:", existingSlot.id);
+          
+          const { error } = await supabase
+            .from('appointments')
+            .update(appointmentData)
+            .eq('id', existingSlot.id);
+            
+          dbError = error;
+        } else {
+          // Se está CONFIRMED ou PENDING, é colisão real
+          alert("Ops! Esse horário acabou de ser ocupado por outro cliente.");
+          await loadAvailableSlots(selectedDate);
+          setLoading(false);
+          return;
+        }
 
-      // Prepara dados de sucesso
-      const serviceName = services.find(s => s.id === formData.service_id)?.name || 'Corte';
+      } else {
+        // --- CENÁRIO B: NÃO EXISTE REGISTRO (Insert) ---
+        console.log("✨ Criando novo horário");
+        
+        const { error } = await supabase
+          .from('appointments')
+          .insert([appointmentData]);
+          
+        dbError = error;
+      }
+
+      // Tratamento de Erro Unificado
+      if (dbError) {
+        console.error("❌ ERRO AO SALVAR:", JSON.stringify(dbError, null, 2));
+        throw new Error(dbError.message || "Erro ao salvar no banco");
+      }
+
+      // Sucesso
+      const serviceName = services.find(s => s.id == formData.service_id)?.name || 'Corte';
       
       setConfirmedAppointment({
         date: selectedDate,
@@ -357,18 +371,17 @@ export default function AgendarPage() {
         service_name: serviceName
       });
 
-      // --- GERAÇÃO DA URL DO WHATSAPP (CORRIGIDA) ---
       const message = `📅 *NOVO AGENDAMENTO*\n\n👤 *Cliente:* ${formData.customer_name}\n📞 *Tel:* ${formData.customer_phone}\n📅 *Data:* ${formatDisplayDate(selectedDate)}\n🕒 *Hora:* ${selectedTime}\n✂️ *Serviço:* ${serviceName}\n\n*Aguardando confirmação!*`;
       
       const encodedMessage = encodeURIComponent(message);
       const finalUrl = `https://wa.me/${whatsappNumber}?text=${encodedMessage}`;
       
       setFinalWhatsappUrl(finalUrl);
-      setSuccess(true); // Vai para tela de sucesso
+      setSuccess(true);
 
     } catch (error) {
-      console.error("Erro ao salvar:", error);
-      alert("Erro ao realizar agendamento. Tente novamente.");
+      console.error("❌ Erro no handleSubmit:", error);
+      alert(`Erro ao realizar agendamento: ${error.message || "Tente novamente."}`);
     } finally {
       setLoading(false);
     }
@@ -376,7 +389,6 @@ export default function AgendarPage() {
 
   // --- TELA DE SUCESSO ---
   const SuccessMessage = () => {
-    // Tenta abrir WhatsApp automaticamente ao carregar a tela de sucesso
     useEffect(() => {
       if (finalWhatsappUrl) {
         const timer = setTimeout(() => {
@@ -403,7 +415,6 @@ export default function AgendarPage() {
             Para finalizar, envie a mensagem de confirmação para o barbeiro no WhatsApp.
           </p>
 
-          {/* BOTÃO GIGANTE PARA GARANTIR O ENVIO DA MENSAGEM */}
           <a
             href={finalWhatsappUrl}
             target="_blank"
@@ -431,11 +442,8 @@ export default function AgendarPage() {
 
   if (success) return <SuccessMessage />;
 
-  // --- RENDERIZAÇÃO PRINCIPAL ---
-
   return (
     <div className="min-h-screen flex flex-col" style={{ background: "linear-gradient(135deg, #000 0%, #1a1a1a 100%)" }}>
-      {/* Header */}
       <div className="flex justify-between items-center p-4 sm:p-6 border-b border-gray-800">
         <Link href="/" className="text-xl font-bold text-yellow-500">LEO PRIME</Link>
         <div className={`text-sm font-bold ${status === 'aberto' ? 'text-green-500' : 'text-red-500'}`}>
@@ -443,12 +451,10 @@ export default function AgendarPage() {
         </div>
       </div>
 
-      {/* Conteúdo */}
       <div className="flex-1 max-w-3xl mx-auto w-full p-4 sm:p-6">
         <h1 className="text-3xl md:text-4xl font-black text-center mb-2 text-yellow-500">AGENDAMENTO</h1>
         <p className="text-center text-gray-400 mb-8">Reserve seu horário com facilidade</p>
 
-        {/* MENSAGEM DE BLOQUEIO */}
         {isShopBlocked && (
           <div className="bg-red-900/30 border border-red-500 p-6 rounded-lg text-center mb-8">
             <div className="text-4xl mb-2">🚫</div>
@@ -460,10 +466,8 @@ export default function AgendarPage() {
           </div>
         )}
 
-        {/* FORMULÁRIO */}
         <form onSubmit={handleSubmit} className={`space-y-6 ${isShopBlocked ? 'opacity-50 pointer-events-none' : ''}`}>
           
-          {/* Inputs Nome e Telefone */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
               <label className="text-white text-sm font-bold mb-1 block">Seu Nome</label>
@@ -491,7 +495,6 @@ export default function AgendarPage() {
             </div>
           </div>
 
-          {/* Serviço */}
           <div>
             <label className="text-white text-sm font-bold mb-1 block">Serviço</label>
             <select
@@ -508,7 +511,6 @@ export default function AgendarPage() {
             </select>
           </div>
 
-          {/* Data e Hora */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
               <label className="text-white text-sm font-bold mb-1 block">Data</label>
@@ -562,7 +564,6 @@ export default function AgendarPage() {
         </form>
       </div>
 
-      {/* Footer Simples */}
       <footer className="p-6 text-center text-gray-600 text-sm border-t border-gray-900">
         <p>© 2025 Leo Prime Barbershop</p>
       </footer>

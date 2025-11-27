@@ -244,7 +244,7 @@ function AdminContent() {
     }
   };
 
-  // --- FUNÇÕES DE FILA (CORRIGIDAS - SEM created_at/updated_at) ---
+  // --- FUNÇÕES DE FILA ---
 
   const createNewQueueEntry = async () => {
     try {
@@ -305,29 +305,25 @@ function AdminContent() {
     }
   };
 
-  // --- FUNÇÃO UPDATE QUEUE CORRIGIDA (SEM created_at/updated_at) ---
   const updateQueue = async (type) => {
     try {
-      // 1. Busca estado atual
       let { data: currentQueue } = await supabase
         .from('queue_counters')
         .select('*')
         .eq('date', today)
         .maybeSingle();
 
-      // 2. Se não existe registro para hoje (Primeiro clique do dia)
       if (!currentQueue) {
         if (type === 'out') {
           alert("Não há clientes na barbearia para registrar saída!");
           return;
         }
 
-        // Se for entrada, cria JÁ COM O VALOR 1
         const { data: newQueue, error: createError } = await supabase
           .from('queue_counters')
           .insert({
             date: today,
-            in_count: 1, // Começa com 1
+            in_count: 1,
             out_count: 0
           })
           .select()
@@ -345,7 +341,6 @@ function AdminContent() {
         return;
       }
 
-      // 3. Se já existe, atualiza normalmente
       const currentIn = currentQueue.in_count || 0;
       const currentOut = currentQueue.out_count || 0;
       const currentPeople = currentIn - currentOut;
@@ -583,7 +578,6 @@ function AdminContent() {
         return;
       }
 
-      // MENSAGEM DE CONFIRMAÇÃO PRÉ-PRONTA
       const confirmationMessage = `✅ *AGENDAMENTO CONFIRMADO!*\n\nOlá ${appointment.customer_name}! 👋\n\nÉ com grande satisfação que informamos que seu agendamento na *LEO PRIME BARBERSHOP* foi *CONFIRMADO COM SUCESSO!* 🎉\n\n📅 *Data:* ${appointment.date}\n🕒 *Horário:* ${appointment.time}\n\n💈 *Serviço:* Corte de Cabelo\n\n📍 *Endereço:* Rua São José, Jardim Nova Esperança - Salvador/BA\n\n📋 *Informações importantes:*\n• Chegue com 5 minutos de antecedência\n• Traga este comprovante consigo\n• Em caso de imprevisto, entre em contato conosco\n\nAgradecemos pela confiança e preferência! 💈✂️\n\n*LEO PRIME BARBERSHOP*\n*Transformando estilo, elevando autoestima!*`;
 
       const { error } = await supabase
@@ -593,7 +587,6 @@ function AdminContent() {
 
       if (error) throw error;
 
-      // Envia mensagem de confirmação via WhatsApp
       sendWhatsAppMessage(appointment.customer_phone, confirmationMessage);
       
       await loadPendingAppointments();
@@ -616,9 +609,10 @@ function AdminContent() {
         return;
       }
 
-      // MENSAGEM DE CANCELAMENTO PRÉ-PRONTA
-      const cancellationMessage = `❌ *AGENDAMENTO NÃO CONFIRMADO*\n\nOlá ${appointment.customer_name}!\n\nLamentamos informar que seu agendamento para *${appointment.date}* às *${appointment.time}* *não pôde ser confirmado* na LEO PRIME BARBERSHOP.\n\n📋 *Possíveis motivos:*\n• Horário indisponível\n• Lotação no período solicitado\n• Manutenção agendada\n\n🔄 *Como proceder:*\n• Entre em contato conosco para verificar outros horários disponíveis\n• Acesse nosso sistema de agendamento online\n• Visite nossa barbearia para agendamento presencial\n\n📞 *Contato:* (71) 99999-9999\n\nPedimos desculpas pelo inconveniente e esperamos poder atendê-lo em breve!\n\n*LEO PRIME BARBERSHOP*\n*Sempre à disposição para melhor servi-lo!*`;
+      const cancellationMessage = `❌ *AGENDAMENTO CANCELADO*\n\nOlá ${appointment.customer_name}!\n\nLamentamos informar que seu agendamento para *${appointment.date}* às *${appointment.time}* foi *cancelado*.\n\n📋 *Informações:*\n• Data: ${appointment.date}\n• Horário: ${appointment.time}\n\n🔄 *Como proceder:*\n• Entre em contato conosco para verificar outros horários disponíveis\n• Acesse nosso sistema de agendamento online\n• Visite nossa barbearia para agendamento presencial\n\n📞 *Contato:* (71) 99999-9999\n\nPedimos desculpas pelo inconveniente e esperamos poder atendê-lo em breve!\n\n*LEO PRIME BARBERSHOP*\n*Sempre à disposição para melhor servi-lo!*`;
 
+      // Ao mudar para 'cancelled', o horário é liberado automaticamente
+      // pois as funções de verificação só buscam 'confirmed' e 'pending'
       const { error } = await supabase
         .from('appointments')
         .update({ status: 'cancelled' })
@@ -626,17 +620,16 @@ function AdminContent() {
 
       if (error) throw error;
 
-      // Envia mensagem de cancelamento via WhatsApp
       sendWhatsAppMessage(appointment.customer_phone, cancellationMessage);
       
       await loadPendingAppointments();
       const validDate = validateAndFormatDate(selectedDate);
       await loadAppointmentsByDate(validDate);
       
-      alert("Agendamento cancelado e mensagem enviada ao cliente!");
+      alert("Agendamento cancelado e mensagem enviada ao cliente! O horário está disponível para novos agendamentos.");
     } catch (err) {
       console.error('❌ Erro ao cancelar:', JSON.stringify(err, null, 2));
-      setError(err.message);
+      setError(`Erro ao cancelar: ${err.message}`);
     }
   };
 
@@ -663,11 +656,15 @@ function AdminContent() {
     setRescheduleLoading(true);
     try {
       const validDate = validateAndFormatDate(originalDate);
+      
+      // --- MUDANÇA AQUI ---
+      // Agora buscamos 'confirmed' E 'pending' para bloquear o horário.
+      // Se o status for 'cancelled', ele NÃO vem nessa lista, então o horário fica livre.
       const { data: existingAppointments } = await supabase
         .from('appointments')
         .select('time')
         .eq('date', validDate)
-        .eq('status', 'confirmed');
+        .in('status', ['confirmed', 'pending']); // ANTES: .eq('status', 'confirmed')
 
       const { data: blocks } = await supabase.from('blocks').select('*').eq('date', validDate);
       const dateObj = new Date(validDate);
@@ -687,7 +684,12 @@ function AdminContent() {
           let current = start;
           while (current < end) {
             const timeString = current.toTimeString().slice(0,5);
-            const isBooked = existingAppointments?.some(apt => apt.time.slice(0,5) === timeString);
+            
+            // Verifica se o horário está ocupado por um agendamento CONFIRMADO ou PENDENTE
+            const isBooked = existingAppointments?.some(apt => 
+              apt.time.slice(0,5) === timeString // Removida a checagem extra de status aqui, pois já filtramos no banco
+            );
+            
             const isBlocked = blocks?.some(block => {
               if (!block.start_time) return true;
               const blockStart = new Date(`1970-01-01T${block.start_time}`);
@@ -695,7 +697,10 @@ function AdminContent() {
               const slotTime = new Date(`1970-01-01T${timeString}`);
               return slotTime >= blockStart && slotTime < blockEnd;
             });
-            if (!isBooked && !isBlocked) slots.push(timeString);
+            
+            if (!isBooked && !isBlocked) {
+              slots.push(timeString);
+            }
             current = new Date(current.getTime() + slotDuration);
           }
         });
@@ -818,6 +823,15 @@ function AdminContent() {
           )
           .on('postgres_changes', { event: '*', schema: 'public', table: 'blocks' }, async () => {
               await checkShopBlockStatus();
+            }
+          )
+          .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'appointments' }, async (payload) => {
+              if (payload.new.status === 'cancelled') {
+                await loadPendingAppointments();
+                const validDate = validateAndFormatDate(selectedDate);
+                await loadAppointmentsByDate(validDate);
+                setLastUpdate(new Date());
+              }
             }
           )
           .subscribe((status) => {
