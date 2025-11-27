@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import Link from "next/link";
 
@@ -12,34 +12,58 @@ export default function AgendarPage() {
   const [selectedTime, setSelectedTime] = useState("");
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState(false);
+  
+  // Estado para armazenar a URL do WhatsApp gerada
+  const [finalWhatsappUrl, setFinalWhatsappUrl] = useState("");
+
   const [formData, setFormData] = useState({
     customer_name: "",
     customer_phone: "",
     service_id: ""
   });
+  
+  const [blockedMessage, setBlockedMessage] = useState("");
+  const [isDateBlocked, setIsDateBlocked] = useState(false);
+  const [showTimeDropdown, setShowTimeDropdown] = useState(false);
+  
+  // Estados de Bloqueio da Loja
+  const [isShopBlocked, setIsShopBlocked] = useState(false);
+  const [shopBlockMessage, setShopBlockMessage] = useState("");
 
-  const whatsapp = "5571987404707";
+  const [confirmedAppointment, setConfirmedAppointment] = useState({
+    date: "",
+    time: "",
+    customer_name: "",
+    service_name: ""
+  });
+
+  const dropdownRef = useRef(null);
+
+  // Configurações da Barbearia
+  const whatsappNumber = "5571987404707"; // Apenas números
   const whatsappFormatted = "(71) 98740-4707";
   const address = "Rua São José, Jardim Nova Esperança";
   const city = "Salvador, Bahia";
-  const cep = "41370-070";
-  const whatsappLink = `https://wa.me/${whatsapp}?text=Olá, gostaria de agendar um horário na LEO PRIME BARBERSHOP!`;
+  const whatsappLinkGeneral = `https://wa.me/${whatsappNumber}?text=Olá, gostaria de tirar uma dúvida sobre a LEO PRIME BARBERSHOP!`;
 
-  // Formatação do telefone
+  // --- FUNÇÕES AUXILIARES ---
+
+  // Função para obter data local correta (Igual ao Admin)
+  const getLocalDate = () => {
+    const date = new Date();
+    const offset = date.getTimezoneOffset();
+    const localDate = new Date(date.getTime() - (offset * 60 * 1000));
+    return localDate.toISOString().split('T')[0];
+  };
+
   const formatPhone = (value) => {
     const numbers = value.replace(/\D/g, '');
     const limited = numbers.slice(0, 11);
-    
-    if (limited.length <= 2) {
-      return limited;
-    } else if (limited.length <= 7) {
-      return `(${limited.slice(0, 2)}) ${limited.slice(2)}`;
-    } else {
-      return `(${limited.slice(0, 2)}) ${limited.slice(2, 7)}-${limited.slice(7, 11)}`;
-    }
+    if (limited.length <= 2) return limited;
+    if (limited.length <= 7) return `(${limited.slice(0, 2)}) ${limited.slice(2)}`;
+    return `(${limited.slice(0, 2)}) ${limited.slice(2, 7)}-${limited.slice(7, 11)}`;
   };
 
-  // Formatação do nome - primeira letra maiúscula e sem números
   const formatName = (value) => {
     const noNumbers = value.replace(/[0-9]/g, '');
     return noNumbers
@@ -49,34 +73,115 @@ export default function AgendarPage() {
       .join(' ');
   };
 
-  // Carrega dados iniciais
+  const formatDisplayDate = (dateString) => {
+    try {
+      const [year, month, day] = dateString.split('-');
+      return `${day}/${month}/${year}`;
+    } catch (error) {
+      return dateString;
+    }
+  };
+
+  // --- LÓGICA DE BLOQUEIO CORRIGIDA ---
+
+  const checkShopBlock = async () => {
+    try {
+      // Usa a data local para garantir sincronia com o Admin
+      const today = getLocalDate();
+      
+      // Busca bloqueio ESPECÍFICO para a data de hoje
+      const { data: activeBlocks, error } = await supabase
+        .from('blocks')
+        .select('*')
+        .eq('date', today) // Filtra pela data exata
+        .eq('reason', 'BLOQUEIO_GERAL')
+        .maybeSingle(); // Retorna um ou null
+
+      if (error) {
+        console.log('ℹ️ Erro ao verificar bloqueio:', error.message);
+        return;
+      }
+
+      if (activeBlocks) {
+        console.log('🚫 Barbearia BLOQUEADA para hoje:', activeBlocks);
+        setIsShopBlocked(true);
+        setShopBlockMessage(activeBlocks.reason || "Barbearia fechada temporariamente.");
+        
+        // Limpa slots se estiver bloqueado
+        setAvailableSlots([]);
+        setSelectedTime("");
+        setShowTimeDropdown(false);
+      } else {
+        console.log('✅ Barbearia LIBERADA hoje');
+        setIsShopBlocked(false);
+        setShopBlockMessage("");
+      }
+
+    } catch (error) {
+      console.log('ℹ️ Erro geral bloqueio:', error);
+    }
+  };
+
+  // --- EFEITOS (UseEffect) ---
+
   useEffect(() => {
     loadInitialData();
     
+    // Listener para Status (Aberto/Fechado/Almoço)
     const statusSub = supabase
       .channel('public:shop_status')
-      .on('postgres_changes', 
-        { 
-          event: 'INSERT', 
-          schema: 'public', 
-          table: 'shop_status' 
-        }, 
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'shop_status' }, 
         (payload) => {
-          if (payload.new) {
-            setStatus(payload.new.status);
-          }
+          if (payload.new) setStatus(payload.new.status);
+        }
+      )
+      .subscribe();
+
+    // Listener para Bloqueios (Bloqueio Geral)
+    const blocksSub = supabase
+      .channel('public:blocks')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'blocks' },
+        async () => {
+          console.log('🔄 Atualização de bloqueios detectada');
+          await checkShopBlock();
+          if (selectedDate) await loadAvailableSlots(selectedDate);
         }
       )
       .subscribe();
 
     return () => {
       statusSub.unsubscribe();
+      blocksSub.unsubscribe();
     };
   }, []);
 
+  // Fecha dropdown ao clicar fora
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target)) {
+        setShowTimeDropdown(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
+  // Carrega slots ao mudar data
+  useEffect(() => {
+    if (selectedDate) {
+      loadAvailableSlots(selectedDate);
+    } else {
+      setAvailableSlots([]);
+      setBlockedMessage("");
+      setIsDateBlocked(false);
+    }
+  }, [selectedDate]);
+
   const loadInitialData = async () => {
     try {
-      // Carrega status
+      const today = getLocalDate();
+      setSelectedDate(today);
+
       const { data: statusData } = await supabase
         .from('shop_status')
         .select('status')
@@ -84,453 +189,382 @@ export default function AgendarPage() {
         .limit(1)
         .single();
 
-      if (statusData) {
-        setStatus(statusData.status);
-      }
+      if (statusData) setStatus(statusData.status);
 
-      // Carrega serviços ativos do banco
       const { data: servicesData } = await supabase
         .from('services')
         .select('*')
         .eq('active', true)
         .order('price_cents', { ascending: false });
 
-      if (servicesData) {
-        setServices(servicesData);
-      }
+      if (servicesData) setServices(servicesData);
+
+      await checkShopBlock();
+      await loadAvailableSlots(today);
     } catch (error) {
-      console.error("Erro ao carregar dados:", error);
+      console.error("Erro inicial:", error);
     }
   };
 
-  // Quando a data muda, carrega os horários disponíveis
-  useEffect(() => {
-    if (selectedDate) {
-      loadAvailableSlots(selectedDate);
+  // --- LÓGICA DE HORÁRIOS ---
+
+  const isTimeInPast = (dateString, timeString) => {
+    try {
+      const now = new Date();
+      const [year, month, day] = dateString.split('-').map(Number);
+      const [hours, minutes] = timeString.split(':').map(Number);
+      const selectedDateTime = new Date(year, month - 1, day, hours, minutes);
+      return selectedDateTime < now;
+    } catch (error) {
+      return false;
     }
-  }, [selectedDate]);
+  };
+
+  const generateTimeSlots = (startTime, endTime, intervalMinutes = 70) => {
+    const slots = [];
+    const [startHours, startMinutes] = startTime.split(':').map(Number);
+    const [endHours, endMinutes] = endTime.split(':').map(Number);
+    
+    let currentHours = startHours;
+    let currentMinutes = startMinutes;
+    
+    while (currentHours < endHours || (currentHours === endHours && currentMinutes < endMinutes)) {
+      const timeString = `${String(currentHours).padStart(2, '0')}:${String(currentMinutes).padStart(2, '0')}`;
+      slots.push(timeString);
+      currentMinutes += intervalMinutes;
+      while (currentMinutes >= 60) {
+        currentMinutes -= 60;
+        currentHours += 1;
+      }
+    }
+    return slots;
+  };
 
   const loadAvailableSlots = async (date) => {
     setLoading(true);
+    setBlockedMessage("");
+    setIsDateBlocked(false);
+    
     try {
-      // Busca agendamentos existentes para a data (apenas confirmados)
+      // 1. Verifica bloqueio geral primeiro
+      await checkShopBlock();
+      if (isShopBlocked) {
+        setLoading(false);
+        return;
+      }
+
+      // 2. Verifica bloqueio específico da data (caso exista lógica para isso no futuro)
+      // ... (código existente mantido)
+
+      // 3. Busca agendamentos existentes
       const { data: existingAppointments } = await supabase
         .from('appointments')
         .select('time')
         .eq('date', date)
         .eq('status', 'confirmed');
 
-      // Busca bloqueios para a data
-      const { data: blocks } = await supabase
-        .from('blocks')
-        .select('*')
-        .eq('date', date);
-
-      // Busca disponibilidade padrão
-      const dateObj = new Date(date);
+      // 4. Define horários baseados no dia da semana
+      const [year, month, day] = date.split('-').map(Number);
+      const dateObj = new Date(year, month - 1, day);
       const weekday = dateObj.getDay();
       
-      const { data: availability } = await supabase
-        .from('availability')
-        .select('*')
-        .eq('weekday', weekday)
-        .eq('active', true);
+      let startTime = "09:00";
+      let endTime = weekday === 0 ? "12:00" : "22:00"; // Domingo até 12h, resto até 22h
+      
+      const allSlots = generateTimeSlots(startTime, endTime, 70);
+      const today = getLocalDate();
 
-      // Gera slots disponíveis
-      let slots = [];
-      if (availability && availability.length > 0) {
-        availability.forEach(avail => {
-          const start = new Date(`1970-01-01T${avail.start_time}`);
-          const end = new Date(`1970-01-01T${avail.end_time}`);
-          const slotDuration = avail.slot_minutes * 60 * 1000;
+      const available = allSlots.filter(timeString => {
+        const isBooked = existingAppointments?.some(apt => apt.time.slice(0,5) === timeString);
+        const isPast = date === today && isTimeInPast(date, timeString);
+        return !isBooked && !isPast;
+      });
 
-          let current = start;
-          while (current < end) {
-            const timeString = current.toTimeString().slice(0,5);
-            
-            // Verifica se o horário não está agendado (confirmado)
-            const isBooked = existingAppointments?.some(apt => 
-              apt.time.slice(0,5) === timeString
-            );
-
-            // Verifica se não está bloqueado
-            const isBlocked = blocks?.some(block => {
-              if (!block.start_time) return true;
-              const blockStart = new Date(`1970-01-01T${block.start_time}`);
-              const blockEnd = new Date(`1970-01-01T${block.end_time}`);
-              const slotTime = new Date(`1970-01-01T${timeString}`);
-              return slotTime >= blockStart && slotTime < blockEnd;
-            });
-
-            if (!isBooked && !isBlocked) {
-              slots.push(timeString);
-            }
-
-            current = new Date(current.getTime() + slotDuration);
-          }
-        });
+      setAvailableSlots(available);
+      
+      if (available.length === 0) {
+        setBlockedMessage(date === today ? "Sem horários para hoje" : "Data lotada");
       }
-
-      setAvailableSlots(slots);
+      
     } catch (error) {
-      console.error("Erro ao carregar horários:", error);
+      console.error("Erro slots:", error);
     } finally {
       setLoading(false);
     }
   };
 
+  // --- ENVIO DO FORMULÁRIO ---
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     
-    // 🔥 CORREÇÃO: Validação do serviço obrigatório
-    if (!formData.customer_name || !formData.customer_phone || !selectedDate || !selectedTime || !formData.service_id) {
-      alert("Por favor, preencha todos os campos obrigatórios.");
+    // Validações Iniciais
+    await checkShopBlock();
+    if (isShopBlocked) {
+      alert("Agendamentos bloqueados no momento.");
       return;
     }
-
-    // Validação do telefone (deve ter pelo menos 10 dígitos)
-    const phoneNumbers = formData.customer_phone.replace(/\D/g, '');
-    if (phoneNumbers.length < 10) {
-      alert("Por favor, insira um número de telefone válido com DDD.");
+    
+    if (!formData.customer_name || !formData.customer_phone || !selectedDate || !selectedTime || !formData.service_id) {
+      alert("Preencha todos os campos.");
       return;
     }
 
     setLoading(true);
+
     try {
-      const { error } = await supabase
+      // Verifica disponibilidade final (Race condition check)
+      const { data: checkBusy } = await supabase
         .from('appointments')
-        .insert([{
-          customer_name: formData.customer_name,
-          customer_phone: formData.customer_phone,
-          service_id: formData.service_id,
-          date: selectedDate,
-          time: selectedTime,
-          status: 'pending'
-        }]);
+        .select('id')
+        .eq('date', selectedDate)
+        .eq('time', selectedTime)
+        .eq('status', 'confirmed');
 
-      if (error) throw error;
+      if (checkBusy && checkBusy.length > 0) {
+        alert("Ops! Esse horário acabou de ser ocupado.");
+        await loadAvailableSlots(selectedDate);
+        setLoading(false);
+        return;
+      }
 
-      setSuccess(true);
-      setFormData({ customer_name: "", customer_phone: "", service_id: "" });
-      setSelectedDate("");
-      setSelectedTime("");
-      setAvailableSlots([]);
+      const appointmentData = {
+        customer_name: formData.customer_name,
+        customer_phone: formData.customer_phone,
+        service_id: formData.service_id,
+        date: selectedDate,
+        time: selectedTime,
+        status: 'pending',
+        created_at: new Date().toISOString()
+      };
+
+      // Salva no Supabase
+      const { data: newAppointment, error: dbError } = await supabase
+        .from('appointments')
+        .insert([appointmentData])
+        .select()
+        .single();
+
+      if (dbError) throw dbError;
+
+      // Prepara dados de sucesso
+      const serviceName = services.find(s => s.id === formData.service_id)?.name || 'Corte';
+      
+      setConfirmedAppointment({
+        date: selectedDate,
+        time: selectedTime,
+        customer_name: formData.customer_name,
+        service_name: serviceName
+      });
+
+      // --- GERAÇÃO DA URL DO WHATSAPP (CORRIGIDA) ---
+      const message = `📅 *NOVO AGENDAMENTO*\n\n👤 *Cliente:* ${formData.customer_name}\n📞 *Tel:* ${formData.customer_phone}\n📅 *Data:* ${formatDisplayDate(selectedDate)}\n🕒 *Hora:* ${selectedTime}\n✂️ *Serviço:* ${serviceName}\n\n*Aguardando confirmação!*`;
+      
+      const encodedMessage = encodeURIComponent(message);
+      const finalUrl = `https://wa.me/${whatsappNumber}?text=${encodedMessage}`;
+      
+      setFinalWhatsappUrl(finalUrl);
+      setSuccess(true); // Vai para tela de sucesso
+
     } catch (error) {
-      console.error("Erro ao agendar:", error);
+      console.error("Erro ao salvar:", error);
       alert("Erro ao realizar agendamento. Tente novamente.");
     } finally {
       setLoading(false);
     }
   };
 
-  const handleInputChange = (e) => {
-    const { name, value } = e.target;
-    
-    // Formatação específica para cada campo
-    let formattedValue = value;
-    
-    if (name === 'customer_phone') {
-      formattedValue = formatPhone(value);
-    } else if (name === 'customer_name') {
-      formattedValue = formatName(value);
-    }
-    
-    setFormData(prev => ({
-      ...prev,
-      [name]: formattedValue
-    }));
-  };
+  // --- TELA DE SUCESSO ---
+  const SuccessMessage = () => {
+    // Tenta abrir WhatsApp automaticamente ao carregar a tela de sucesso
+    useEffect(() => {
+      if (finalWhatsappUrl) {
+        const timer = setTimeout(() => {
+          window.open(finalWhatsappUrl, '_blank');
+        }, 1000);
+        return () => clearTimeout(timer);
+      }
+    }, []);
 
-  // Calcula a data mínima (amanhã) e máxima (30 dias)
-  const today = new Date();
-  const minDate = new Date(today);
-  minDate.setDate(today.getDate() + 1);
-  
-  const maxDate = new Date(today);
-  maxDate.setDate(today.getDate() + 30);
-
-  const formatDate = (date) => {
-    return date.toISOString().split('T')[0];
-  };
-
-  const getStatusColor = () => {
-    switch(status) {
-      case 'aberto': return 'text-green-400';
-      case 'fechado': return 'text-red-400';
-      case 'almoco': return 'text-yellow-400';
-      case 'manutencao': return 'text-orange-400';
-      default: return 'text-gray-400';
-    }
-  };
-
-  const getStatusText = () => {
-    switch(status) {
-      case 'aberto': return 'Aberto ✓';
-      case 'fechado': return 'Fechado';
-      case 'almoco': return 'Horário de Almoço';
-      case 'manutencao': return 'Em Manutenção';
-      default: return 'Carregando...';
-    }
-  };
-
-  if (success) {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center text-center px-6 py-16" style={{ background: "linear-gradient(135deg, #000 0%, #1a1a1a 100%)" }}>
-        <div className="max-w-4xl">
+        <div className="max-w-md w-full bg-gray-900 p-8 rounded-xl border border-yellow-500 shadow-2xl">
           <div className="text-6xl mb-4">✅</div>
-          <h1 className="text-5xl md:text-6xl font-black mb-4" style={{ color: "#FFD700", textShadow: "0 2px 20px rgba(255, 215, 0, 0.3)" }}>
-            Agendamento Solicitado!
-          </h1>
-          <p className="text-xl text-white/80 mb-6 max-w-2xl mx-auto">
-            Seu agendamento para <strong>{selectedDate}</strong> às <strong>{selectedTime}</strong> foi enviado para confirmação.
-          </p>
-          <p className="text-lg text-yellow-500 mb-8">
-            Aguarde a confirmação do barbeiro. Você receberá uma notificação quando for confirmado.
-          </p>
-          <div className="flex flex-col sm:flex-row gap-4 justify-center">
-            <button
-              onClick={() => setSuccess(false)}
-              className="px-8 py-4 rounded-lg text-lg font-bold transition-all transform hover:scale-105"
-              style={{
-                backgroundColor: "#FFD700",
-                color: "#000",
-                boxShadow: "0 4px 20px rgba(255, 215, 0, 0.4)"
-              }}
-            >
-              Fazer Novo Agendamento
-            </button>
-            <Link
-              href="/"
-              className="px-8 py-4 rounded-lg text-lg font-semibold transition-all hover:bg-white/10"
-              style={{
-                border: "2px solid #FFD700",
-                color: "#FFD700"
-              }}
-            >
-              Voltar para Home
-            </Link>
+          <h1 className="text-3xl font-bold mb-2 text-white">Solicitação Enviada!</h1>
+          
+          <div className="bg-black p-4 rounded-lg mb-6 border border-gray-800 text-left">
+            <p className="text-gray-400 text-sm">Resumo:</p>
+            <p className="text-white font-bold text-lg">{confirmedAppointment.customer_name}</p>
+            <p className="text-yellow-500">{formatDisplayDate(confirmedAppointment.date)} às {confirmedAppointment.time}</p>
+            <p className="text-white text-sm">{confirmedAppointment.service_name}</p>
           </div>
+
+          <p className="text-white mb-6">
+            Para finalizar, envie a mensagem de confirmação para o barbeiro no WhatsApp.
+          </p>
+
+          {/* BOTÃO GIGANTE PARA GARANTIR O ENVIO DA MENSAGEM */}
+          <a
+            href={finalWhatsappUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="block w-full py-4 rounded-lg text-lg font-bold mb-4 animate-pulse"
+            style={{
+              backgroundColor: "#25D366",
+              color: "#000",
+              boxShadow: "0 4px 15px rgba(37, 211, 102, 0.4)"
+            }}
+          >
+            👉 CONFIRMAR NO WHATSAPP
+          </a>
+
+          <button
+            onClick={() => window.location.reload()}
+            className="text-gray-400 hover:text-white text-sm underline"
+          >
+            Voltar para o início
+          </button>
         </div>
       </div>
     );
-  }
+  };
+
+  if (success) return <SuccessMessage />;
+
+  // --- RENDERIZAÇÃO PRINCIPAL ---
 
   return (
     <div className="min-h-screen flex flex-col" style={{ background: "linear-gradient(135deg, #000 0%, #1a1a1a 100%)" }}>
       {/* Header */}
-      <div className="flex justify-between items-center p-6">
-        <Link href="/" className="text-2xl font-bold" style={{ color: "#FFD700" }}>
-          LEO PRIME
-        </Link>
-        <div className={`text-sm font-semibold ${getStatusColor()}`}>
-          {getStatusText()}
+      <div className="flex justify-between items-center p-4 sm:p-6 border-b border-gray-800">
+        <Link href="/" className="text-xl font-bold text-yellow-500">LEO PRIME</Link>
+        <div className={`text-sm font-bold ${status === 'aberto' ? 'text-green-500' : 'text-red-500'}`}>
+          {status === 'aberto' ? 'ABERTO' : status.toUpperCase()}
         </div>
       </div>
 
-      {/* Hero Section */}
-      <section className="flex-1 flex flex-col items-center justify-center text-center px-6 py-8">
-        <div className="max-w-4xl">
-          <h1 className="text-4xl md:text-6xl font-black mb-4" style={{ color: "#FFD700", textShadow: "0 2px 20px rgba(255, 215, 0, 0.3)" }}>
-            AGENDAMENTO
-          </h1>
-          <p className="text-xl text-white/80 mb-8 max-w-2xl mx-auto">
-            Escolha o serviço, data e horário desejados
-          </p>
-        </div>
-      </section>
+      {/* Conteúdo */}
+      <div className="flex-1 max-w-3xl mx-auto w-full p-4 sm:p-6">
+        <h1 className="text-3xl md:text-4xl font-black text-center mb-2 text-yellow-500">AGENDAMENTO</h1>
+        <p className="text-center text-gray-400 mb-8">Reserve seu horário com facilidade</p>
 
-      {/* Formulário de Agendamento */}
-      <section className="py-8 px-6" style={{ backgroundColor: "#0a0a0a" }}>
-        <div className="max-w-2xl mx-auto">
-          <div className="p-8 rounded-lg" style={{ border: "1px solid rgba(255, 215, 0, 0.2)", backgroundColor: "#111" }}>
-            <h2 className="text-2xl font-bold text-center mb-6" style={{ color: "#FFD700" }}>
-              Preencha seus dados
-            </h2>
+        {/* MENSAGEM DE BLOQUEIO */}
+        {isShopBlocked && (
+          <div className="bg-red-900/30 border border-red-500 p-6 rounded-lg text-center mb-8">
+            <div className="text-4xl mb-2">🚫</div>
+            <h2 className="text-xl font-bold text-white mb-2">AGENDAMENTOS SUSPENSOS</h2>
+            <p className="text-red-300 mb-4">{shopBlockMessage}</p>
+            <a href={whatsappLinkGeneral} className="inline-block bg-green-600 text-white px-6 py-2 rounded font-bold">
+              Falar no WhatsApp
+            </a>
+          </div>
+        )}
 
-            <form onSubmit={handleSubmit}>
-              {/* Informações Pessoais */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
-                <div>
-                  <label className="block text-white mb-3 font-semibold">
-                    Nome *
-                  </label>
-                  <input
-                    type="text"
-                    name="customer_name"
-                    value={formData.customer_name}
-                    onChange={handleInputChange}
-                    className="w-full p-4 rounded-lg text-white transition-all"
-                    style={{ 
-                      backgroundColor: "#000",
-                      border: "1px solid rgba(255, 215, 0, 0.3)",
-                      outline: "none"
-                    }}
-                    placeholder="Seu nome completo"
-                    required
-                    pattern="[A-Za-zÀ-ÿ\s]+"
-                    title="Por favor, insira apenas letras"
-                  />
-                  <p className="text-yellow-500 text-xs mt-1">
-                    Apenas letras são permitidas
-                  </p>
-                </div>
-                <div>
-                  <label className="block text-white mb-3 font-semibold">
-                    Telefone *
-                  </label>
-                  <input
-                    type="tel"
-                    name="customer_phone"
-                    value={formData.customer_phone}
-                    onChange={handleInputChange}
-                    className="w-full p-4 rounded-lg text-white transition-all"
-                    style={{ 
-                      backgroundColor: "#000",
-                      border: "1px solid rgba(255, 215, 0, 0.3)",
-                      outline: "none"
-                    }}
-                    placeholder="(71) 98765-4321"
-                    required
-                    pattern="\(\d{2}\)\s\d{4,5}-\d{4}"
-                    title="Formato: (DDD) 9XXXX-XXXX"
-                  />
-                  <p className="text-yellow-500 text-xs mt-1">
-                    Formato: (DDD) 9XXXX-XXXX
-                  </p>
-                </div>
-              </div>
-
-              {/* Serviço - AGORA OBRIGATÓRIO */}
-              <div className="mb-6">
-                <label className="block text-white mb-3 font-semibold">
-                  Serviço Desejado *
-                </label>
-                <select
-                  name="service_id"
-                  value={formData.service_id}
-                  onChange={handleInputChange}
-                  className="w-full p-4 rounded-lg text-white transition-all"
-                  style={{ 
-                    backgroundColor: "#000",
-                    border: "1px solid rgba(255, 215, 0, 0.3)",
-                    outline: "none"
-                  }}
-                  required
-                >
-                  <option value="">Selecione um serviço</option>
-                  {services.map(service => (
-                    <option key={service.id} value={service.id} className="text-white bg-black">
-                      {service.name} - R$ {(service.price_cents / 100).toFixed(2)}
-                    </option>
-                  ))}
-                </select>
-                <p className="text-yellow-500 text-xs mt-1">
-                  * Campo obrigatório
-                </p>
-              </div>
-
-              {/* Data e Horário */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
-                <div>
-                  <label className="block text-white mb-3 font-semibold">
-                    Data *
-                  </label>
-                  <input
-                    type="date"
-                    value={selectedDate}
-                    onChange={(e) => {
-                      setSelectedDate(e.target.value);
-                      setSelectedTime("");
-                    }}
-                    min={formatDate(minDate)}
-                    max={formatDate(maxDate)}
-                    className="w-full p-4 rounded-lg text-white transition-all"
-                    style={{ 
-                      backgroundColor: "#000",
-                      border: "1px solid rgba(255, 215, 0, 0.3)",
-                      outline: "none"
-                    }}
-                    required
-                  />
-                </div>
-                <div>
-                  <label className="block text-white mb-3 font-semibold">
-                    Horário *
-                  </label>
-                  <select
-                    value={selectedTime}
-                    onChange={(e) => setSelectedTime(e.target.value)}
-                    disabled={!selectedDate || loading}
-                    className="w-full p-4 rounded-lg text-white transition-all disabled:opacity-50"
-                    style={{ 
-                      backgroundColor: "#000",
-                      border: "1px solid rgba(255, 215, 0, 0.3)",
-                      outline: "none"
-                    }}
-                    required
-                  >
-                    <option value="">Selecione um horário</option>
-                    {availableSlots.map(slot => (
-                      <option key={slot} value={slot} className="text-white bg-black">
-                        {slot}
-                      </option>
-                    ))}
-                  </select>
-                  {loading && (
-                    <p className="text-yellow-500 text-sm mt-2">Carregando horários disponíveis...</p>
-                  )}
-                  {selectedDate && availableSlots.length === 0 && !loading && (
-                    <p className="text-red-400 text-sm mt-2">Nenhum horário disponível para esta data</p>
-                  )}
-                </div>
-              </div>
-
-              {/* Botão de Agendamento */}
-              <button
-                type="submit"
-                disabled={loading}
-                className="w-full py-4 rounded-lg text-xl font-bold transition-all transform hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none"
-                style={{
-                  backgroundColor: loading ? "#666" : "#FFD700",
-                  color: "#000",
-                  boxShadow: loading ? "none" : "0 4px 20px rgba(255, 215, 0, 0.4)"
-                }}
-              >
-                {loading ? "Enviando..." : "Solicitar Agendamento"}
-              </button>
-            </form>
-
-            <div className="mt-6 text-center text-yellow-500 text-sm">
-              * Após o envio, aguarde a confirmação do barbeiro
+        {/* FORMULÁRIO */}
+        <form onSubmit={handleSubmit} className={`space-y-6 ${isShopBlocked ? 'opacity-50 pointer-events-none' : ''}`}>
+          
+          {/* Inputs Nome e Telefone */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label className="text-white text-sm font-bold mb-1 block">Seu Nome</label>
+              <input
+                type="text"
+                name="customer_name"
+                value={formData.customer_name}
+                onChange={(e) => setFormData({...formData, customer_name: formatName(e.target.value)})}
+                className="w-full bg-gray-900 border border-gray-700 rounded p-3 text-white focus:border-yellow-500 outline-none"
+                placeholder="Nome completo"
+                required
+              />
+            </div>
+            <div>
+              <label className="text-white text-sm font-bold mb-1 block">Seu Telefone</label>
+              <input
+                type="tel"
+                name="customer_phone"
+                value={formData.customer_phone}
+                onChange={(e) => setFormData({...formData, customer_phone: formatPhone(e.target.value)})}
+                className="w-full bg-gray-900 border border-gray-700 rounded p-3 text-white focus:border-yellow-500 outline-none"
+                placeholder="(71) 99999-9999"
+                required
+              />
             </div>
           </div>
-        </div>
-      </section>
 
-      {/* Informações de Contato */}
-      <section className="py-8 px-6" style={{ backgroundColor: "#000" }}>
-        <div className="max-w-6xl mx-auto grid md:grid-cols-3 gap-6">
-          <div className="text-center p-6 rounded-lg" style={{ border: "1px solid rgba(255, 215, 0, 0.2)", backgroundColor: "#0a0a0a" }}>
-            <div className="text-3xl mb-3">📱</div>
-            <h3 className="text-lg font-bold mb-2" style={{ color: "#FFD700" }}>WhatsApp</h3>
-            <a href={whatsappLink} className="text-white/80 hover:text-white">{whatsappFormatted}</a>
+          {/* Serviço */}
+          <div>
+            <label className="text-white text-sm font-bold mb-1 block">Serviço</label>
+            <select
+              name="service_id"
+              value={formData.service_id}
+              onChange={(e) => setFormData({...formData, service_id: e.target.value})}
+              className="w-full bg-gray-900 border border-gray-700 rounded p-3 text-white focus:border-yellow-500 outline-none"
+              required
+            >
+              <option value="">Selecione...</option>
+              {services.map(s => (
+                <option key={s.id} value={s.id}>{s.name} - R$ {(s.price_cents/100).toFixed(2)}</option>
+              ))}
+            </select>
           </div>
-          <div className="text-center p-6 rounded-lg" style={{ border: "1px solid rgba(255, 215, 0, 0.2)", backgroundColor: "#0a0a0a" }}>
-            <div className="text-3xl mb-3">📍</div>
-            <h3 className="text-lg font-bold mb-2" style={{ color: "#FFD700" }}>Localização</h3>
-            <p className="text-white/80 text-sm">{address}, {city}</p>
-          </div>
-          <div className="text-center p-6 rounded-lg" style={{ border: "1px solid rgba(255, 215, 0, 0.2)", backgroundColor: "#0a0a0a" }}>
-            <div className="text-3xl mb-3">⏰</div>
-            <h3 className="text-lg font-bold mb-2" style={{ color: "#FFD700" }}>Horário</h3>
-            <p className="text-white/80 text-sm">Seg-Sex: 09:00-19:00<br/>Sáb: 09:00-17:00</p>
-          </div>
-        </div>
-      </section>
 
-      {/* Rodapé */}
-      <footer className="py-6 px-6 text-center text-white/60 text-sm" style={{ backgroundColor: "#000", borderTop: "1px solid rgba(255, 215, 0, 0.1)" }}>
-        <p>© 2025 LEO PRIME BARBERSHOP. Todos os direitos reservados.</p>
+          {/* Data e Hora */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label className="text-white text-sm font-bold mb-1 block">Data</label>
+              <input
+                type="date"
+                value={selectedDate}
+                onChange={(e) => setSelectedDate(e.target.value)}
+                min={getLocalDate()}
+                className="w-full bg-gray-900 border border-gray-700 rounded p-3 text-white focus:border-yellow-500 outline-none"
+                required
+              />
+            </div>
+            
+            <div className="relative" ref={dropdownRef}>
+              <label className="text-white text-sm font-bold mb-1 block">Horário</label>
+              <div
+                onClick={() => !isDateBlocked && availableSlots.length > 0 && setShowTimeDropdown(!showTimeDropdown)}
+                className={`w-full bg-gray-900 border border-gray-700 rounded p-3 text-white flex items-center justify-between cursor-pointer ${availableSlots.length === 0 ? 'opacity-50' : ''}`}
+              >
+                <span>{selectedTime || (availableSlots.length > 0 ? "Selecione um horário" : "Indisponível")}</span>
+                <span className="text-yellow-500">▼</span>
+              </div>
+
+              {showTimeDropdown && (
+                <div className="absolute z-20 w-full mt-1 bg-gray-900 border border-yellow-500 rounded max-h-60 overflow-y-auto shadow-xl">
+                  {availableSlots.map(slot => (
+                    <div
+                      key={slot}
+                      onClick={() => { setSelectedTime(slot); setShowTimeDropdown(false); }}
+                      className="p-3 hover:bg-yellow-500 hover:text-black cursor-pointer text-white border-b border-gray-800"
+                    >
+                      {slot}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {blockedMessage && <p className="text-red-400 text-center font-bold">{blockedMessage}</p>}
+
+          <button
+            type="submit"
+            disabled={loading || isShopBlocked || !selectedTime}
+            className="w-full py-4 rounded-lg font-bold text-lg transition-all transform hover:scale-105 disabled:opacity-50 disabled:transform-none"
+            style={{ backgroundColor: "#FFD700", color: "#000" }}
+          >
+            {loading ? "Processando..." : "SOLICITAR AGENDAMENTO"}
+          </button>
+
+        </form>
+      </div>
+
+      {/* Footer Simples */}
+      <footer className="p-6 text-center text-gray-600 text-sm border-t border-gray-900">
+        <p>© 2025 Leo Prime Barbershop</p>
       </footer>
     </div>
   );
